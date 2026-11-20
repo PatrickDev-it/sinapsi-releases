@@ -32,9 +32,12 @@ dmg="$out/sinapsi-desktop-macos-universal.dmg"
 
 cd "$desktop"
 mkdir -p sidecar licenses
-lipo -create \
-    "$source_dir/target/aarch64-apple-darwin/release/sinapsi" \
-    "$source_dir/target/x86_64-apple-darwin/release/sinapsi" \
+# A universal build compiles each architecture on its own, and tauri-build requires the sidecar
+# under that architecture's triple; the bundler then takes the universal one.
+for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+    cp "$source_dir/target/$triple/release/sinapsi" "sidecar/sinapsi-$triple"
+done
+lipo -create sidecar/sinapsi-aarch64-apple-darwin sidecar/sinapsi-x86_64-apple-darwin \
     -output sidecar/sinapsi-universal-apple-darwin
 cp "$notices"/* licenses/
 
