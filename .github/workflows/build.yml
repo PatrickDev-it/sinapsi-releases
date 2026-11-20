@@ -155,14 +155,19 @@ jobs:
             & $ps1.FullName -VerifyOnly
             if (-not $?) { throw "$($zip.Name): -VerifyOnly failed" }
           }
+      # test_windows_installer.ps1 resolves a relative -BinaryPath against its own repo root
+      # (source/), not the working directory, so the artifact under out/ must be given absolute.
       - name: Install, upgrade, rollback, uninstall — CLI only
         shell: powershell
-        run: .\source\validation\test_windows_installer.ps1 -BinaryPath out/bin/sinapsi.exe
+        run: |
+          .\source\validation\test_windows_installer.ps1 -BinaryPath (Resolve-Path out/bin/sinapsi.exe).Path
       - name: Install, upgrade, rollback, uninstall — with the desktop app
         shell: powershell
-        run: >
-          .\source\validation\test_windows_installer.ps1 -BinaryPath out/bin/sinapsi.exe
-          -DesktopPath out/bin/sinapsi-desktop.exe -NoticesDir out/notices
+        run: |
+          .\source\validation\test_windows_installer.ps1 `
+            -BinaryPath (Resolve-Path out/bin/sinapsi.exe).Path `
+            -DesktopPath (Resolve-Path out/bin/sinapsi-desktop.exe).Path `
+            -NoticesDir (Resolve-Path out/notices).Path
 
   macos:
     name: macOS — build and verify
