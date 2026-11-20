@@ -40,7 +40,9 @@ sh sinapsi-cli-macos-aarch64-installer.sh --uninstall
 ```
 
 App desktop: apri il `.dmg` e trascina **Sinapsi** in Applicazioni. L'app è firmata solo ad hoc,
-non notarizzata: al primo avvio macOS la blocca. Aprila con clic destro → **Apri**, oppure:
+non notarizzata: al primo avvio macOS la blocca. Dopo il primo tentativo di apertura autorizzala
+da Impostazioni di Sistema → Privacy e sicurezza → **Apri comunque** (su macOS 14 e precedenti
+basta clic destro → **Apri**), oppure:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Sinapsi.app

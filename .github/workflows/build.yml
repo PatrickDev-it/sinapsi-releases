@@ -90,6 +90,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: "cargo-about@0.9.3,cargo-deny@0.20.2" }
 
+      # First: it reads the lockfiles, not the binaries, so a refused notice costs a minute.
+      - name: Third-party notices
+        shell: bash
+        run: bash releases/ci/notices.sh source x86_64-pc-windows-msvc out/notices
       - name: Build the CLI
         shell: bash
         working-directory: source
@@ -101,9 +105,6 @@ jobs:
           bash ../../releases/ci/quiet.sh npm ci
           bash ../../releases/ci/quiet.sh npm run build
           bash ../../releases/ci/quiet.sh cargo build --release --locked --message-format=short --target x86_64-pc-windows-msvc
-      - name: Third-party notices
-        shell: bash
-        run: bash releases/ci/notices.sh source x86_64-pc-windows-msvc out/notices
 
       - name: Build the installers
         shell: powershell
@@ -197,6 +198,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: "cargo-about@0.9.3,cargo-deny@0.20.2" }
 
+      # First: it reads the lockfiles, not the binaries, so a refused notice costs a minute.
+      - name: Third-party notices
+        run: bash releases/ci/notices.sh source aarch64-apple-darwin out/notices
       - name: Build the CLI (Apple Silicon and Intel)
         working-directory: source
         run: |
@@ -217,8 +221,6 @@ jobs:
               --out "out/installers/sinapsi-cli-macos-$arch-installer.sh"
           done
 
-      - name: Third-party notices
-        run: bash releases/ci/notices.sh source aarch64-apple-darwin out/notices
       - name: Build the desktop frontend
         working-directory: source/desktop
         run: |

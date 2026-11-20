@@ -8,8 +8,13 @@
 #     executable, which is exactly where the desktop looks for it (desktop/README.md, «Avvio»);
 #   - `mainBinaryName` stays `sinapsi-desktop`: the default would be the product name `Sinapsi`,
 #     and on a case-insensitive APFS volume `Sinapsi` and `sinapsi` are the same file;
-#   - the notices travel in Contents/Resources/licenses, as they do in the Windows package;
-#   - the signature is ad hoc (`-`): no Apple Developer ID, so no notarization.
+#   - the notices travel in Contents/Resources/licenses, as they do in the Windows package.
+#
+# Tauri builds the .app only. Signing and the .dmg are three plain commands, as in any
+# drag-to-Applications image: no Apple Developer ID, so the signature is ad hoc (`-`), nested
+# code first and the bundle last, and nothing is notarized; the image is a folder holding the
+# app and a link to /Applications, made by `hdiutil create`. Tauri's own dmg target drives
+# Finder through AppleScript to lay out the window, which a headless runner has no use for.
 #
 # Usage: bash ci/macos-desktop.sh <source checkout> <version|""> <out dir>
 # Expects target/{aarch64,x86_64}-apple-darwin/release/sinapsi already built in the checkout and
@@ -23,6 +28,7 @@ notices="$(cd "$out/../notices" && pwd)"
 here="$(cd "$(dirname "$0")" && pwd)"
 tauri_cli="@tauri-apps/cli@2.12.5"
 desktop="$source_dir/desktop"
+dmg="$out/sinapsi-desktop-macos-universal.dmg"
 
 cd "$desktop"
 mkdir -p sidecar licenses
@@ -42,13 +48,13 @@ cat > tauri.release.json <<EOF
   "mainBinaryName": "sinapsi-desktop",
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": ["app"],
     "icon": [".release-icons/icon.icns", ".release-icons/128x128.png", ".release-icons/128x128@2x.png"],
     "externalBin": ["sidecar/sinapsi"],
     "resources": ["licenses/*"],
     "category": "DeveloperTool",
     "copyright": "Copyright (c) 2026 Patrick Simonetti",
-    "macOS": { "minimumSystemVersion": "11.0", "signingIdentity": "-" }
+    "macOS": { "minimumSystemVersion": "11.0" }
   }
 }
 EOF
@@ -56,15 +62,47 @@ EOF
 bash "$here/quiet.sh" npx --yes "$tauri_cli" build --ci --target universal-apple-darwin \
     --config tauri.release.json -- --locked
 
-bundle="target/universal-apple-darwin/release/bundle"
-app="$bundle/macos/Sinapsi.app"
-dmg="$(ls "$bundle"/dmg/*.dmg)"
-
-# What the user will run, run once: both executables answer, both carry both architectures.
-for exe in sinapsi-desktop sinapsi; do
-    echo "$exe: $(lipo -archs "$app/Contents/MacOS/$exe") — $("$app/Contents/MacOS/$exe" --version)"
-done
-ls "$app/Contents/Resources/licenses"
+app="$desktop/target/universal-apple-darwin/release/bundle/macos/Sinapsi.app"
+codesign --force --sign - "$app/Contents/MacOS/sinapsi"
+codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 
-cp "$dmg" "$out/sinapsi-desktop-macos-universal.dmg"
+work="$(mktemp -d "${TMPDIR:-/tmp}/sinapsi-dmg.XXXXXX")"
+mounted=""
+cleanup() {
+    if [ -n "$mounted" ]; then hdiutil detach -quiet "$mounted" || true; fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+
+mkdir "$work/image" "$work/mount"
+ditto "$app" "$work/image/Sinapsi.app"
+ln -s /Applications "$work/image/Applications"
+# A hosted runner's hdiutil now and then answers "Resource busy"; the image is rebuilt whole.
+for attempt in 1 2 3; do
+    hdiutil create -quiet -volname Sinapsi -srcfolder "$work/image" -ov -format UDZO "$dmg" && break
+    [ "$attempt" -lt 3 ] || exit 1
+    sleep 10
+done
+
+# What the user will get, checked from the image itself: it mounts, the app's signature holds,
+# both executables answer on every architecture this runner can execute (Intel through
+# Rosetta, when installed), the notices are inside.
+hdiutil verify -quiet "$dmg"
+hdiutil attach -quiet -readonly -nobrowse -mountpoint "$work/mount" "$dmg"
+mounted="$work/mount"
+shipped="$mounted/Sinapsi.app"
+codesign --verify --deep --strict "$shipped"
+for exe in sinapsi-desktop sinapsi; do
+    echo "$exe: $(lipo -archs "$shipped/Contents/MacOS/$exe")"
+    for arch in arm64 x86_64; do
+        if ! arch "-$arch" /usr/bin/true 2>/dev/null; then
+            echo "  $arch: not run, this runner cannot execute $arch"
+            continue
+        fi
+        answer="$(arch "-$arch" "$shipped/Contents/MacOS/$exe" --version)"
+        echo "  $arch: $answer"
+    done
+done
+ls "$shipped/Contents/Resources/licenses"
+shasum -a 256 "$dmg"
