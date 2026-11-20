@@ -19,8 +19,14 @@
 #   - every build step goes through ci/quiet.sh, which never prints a source line;
 #   - only binaries leave the runner (artifacts, release assets).
 #
-# Prerequisite: the secret SINAPSI_SOURCE_TOKEN, a fine-grained token with read-only
-# "Contents" on PatrickDev-it/Sinapsi (it clones the source and downloads the vendor release).
+# Access to the source: the secret SINAPSI_SOURCE_SSH_KEY, the private half of a READ-ONLY deploy
+# key on PatrickDev-it/Sinapsi. It can clone that one repository and nothing else; revoke it from
+# that repository's Settings → Deploy keys.
+#
+# The Windows CLI embeds two indexer bundles that are not in git. They are assets of the DRAFT
+# release `vendor-scip-win32-x64` of this repository — a draft is never shown to the public —
+# and ci/fetch-vendor.sh accepts them only if they match the source's src/cli/vendor/SHA256SUMS.
+# Seeing a draft takes write access, hence `contents: write` on the Windows build job alone.
 name: build
 
 on:
@@ -45,12 +51,15 @@ concurrency:
 env:
   SOURCE_REPO: PatrickDev-it/Sinapsi
   VENDOR_TAG: vendor-scip-win32-x64
+  VENDOR_REPO: ${{ github.repository }}
   CARGO_TERM_COLOR: never
 
 jobs:
   windows:
     name: Windows x64 — build
     runs-on: windows-2022
+    permissions:
+      contents: write # the vendor release is a draft
     outputs:
       commit: ${{ steps.source.outputs.commit }}
     steps:
@@ -60,7 +69,7 @@ jobs:
         with:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          ssh-key: ${{ secrets.SINAPSI_SOURCE_SSH_KEY }}
           path: source
           persist-credentials: false
       - id: source
@@ -70,7 +79,7 @@ jobs:
           echo "commit=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Fetch the embedded indexers
         shell: bash
-        env: { GH_TOKEN: "${{ secrets.SINAPSI_SOURCE_TOKEN }}" }
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: bash releases/ci/fetch-vendor.sh source
       - uses: dtolnay/rust-toolchain@1.96.0
         with: { targets: x86_64-pc-windows-msvc }
@@ -128,7 +137,7 @@ jobs:
         with:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ needs.windows.outputs.commit }}
-          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          ssh-key: ${{ secrets.SINAPSI_SOURCE_SSH_KEY }}
           path: source
           persist-credentials: false
           sparse-checkout: |
@@ -167,7 +176,7 @@ jobs:
         with:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          ssh-key: ${{ secrets.SINAPSI_SOURCE_SSH_KEY }}
           path: source
           persist-credentials: false
       - id: source
