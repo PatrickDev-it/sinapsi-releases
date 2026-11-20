@@ -1,0 +1,259 @@
+# Builds the Sinapsi installers, one job per target OS, from the PRIVATE source repository:
+#
+#   Windows x64 (one binary for Windows 10 and 11)
+#     sinapsi-cli-windows-x64-installer.zip      global CLI (`sinapsi` on PATH)
+#     sinapsi-desktop-windows-x64-installer.zip  desktop app + its owner + notices
+#   macOS
+#     sinapsi-cli-macos-aarch64-installer.sh     global CLI, Apple Silicon
+#     sinapsi-cli-macos-x86_64-installer.sh      global CLI, Intel
+#     sinapsi-desktop-macos-universal.dmg        desktop app, Apple Silicon + Intel
+#
+# The installers themselves are the source's own (packaging/, validated by validation/); this
+# workflow only drives them. The Windows lifecycle tests run twice: windows-2022 (the Windows 10
+# kernel family) and windows-2025 (the Windows 11 family). GitHub offers no client editions of
+# Windows, so these are the closest runners, not Windows 10/11 Home or Pro.
+#
+# THIS REPOSITORY IS PUBLIC, THE SOURCE IS NOT. Hence:
+#   - no `pull_request` trigger: nobody but a maintainer can make this workflow run;
+#   - no caches: a cache is restorable by later runs and would carry compiled proprietary crates;
+#   - every build step goes through ci/quiet.sh, which never prints a source line;
+#   - only binaries leave the runner (artifacts, release assets).
+#
+# Prerequisite: the secret SINAPSI_SOURCE_TOKEN, a fine-grained token with read-only
+# "Contents" on PatrickDev-it/Sinapsi (it clones the source and downloads the vendor release).
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit of PatrickDev-it/Sinapsi to build"
+        required: true
+        default: main
+      version:
+        description: "Release tag to publish here (e.g. v0.1.0). Empty: build only, installers stay on the run"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: PatrickDev-it/Sinapsi
+  VENDOR_TAG: vendor-scip-win32-x64
+  CARGO_TERM_COLOR: never
+
+jobs:
+  windows:
+    name: Windows x64 — build
+    runs-on: windows-2022
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: releases }
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          path: source
+          persist-credentials: false
+      - id: source
+        shell: bash
+        run: |
+          test -d source/desktop || { echo "::error::${{ inputs.ref }} has no desktop/: pick a ref that ships the desktop app"; exit 1; }
+          echo "commit=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Fetch the embedded indexers
+        shell: bash
+        env: { GH_TOKEN: "${{ secrets.SINAPSI_SOURCE_TOKEN }}" }
+        run: bash releases/ci/fetch-vendor.sh source
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with: { targets: x86_64-pc-windows-msvc }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-about@0.9.3,cargo-deny@0.20.2" }
+
+      - name: Build the CLI
+        shell: bash
+        working-directory: source
+        run: bash ../releases/ci/quiet.sh cargo build --release --locked --message-format=short -p sinapsi-cli --target x86_64-pc-windows-msvc
+      - name: Build the desktop app
+        shell: bash
+        working-directory: source/desktop
+        run: |
+          bash ../../releases/ci/quiet.sh npm ci
+          bash ../../releases/ci/quiet.sh npm run build
+          bash ../../releases/ci/quiet.sh cargo build --release --locked --message-format=short --target x86_64-pc-windows-msvc
+      - name: Third-party notices
+        shell: bash
+        run: bash releases/ci/notices.sh source x86_64-pc-windows-msvc out/notices
+
+      - name: Build the installers
+        shell: powershell
+        run: |
+          $cli = 'source/target/x86_64-pc-windows-msvc/release/sinapsi.exe'
+          $desktop = 'source/desktop/target/x86_64-pc-windows-msvc/release/sinapsi-desktop.exe'
+          New-Item -ItemType Directory -Force out/installers, out/bin | Out-Null
+          & source/packaging/windows/build-installer.ps1 -BinaryPath $cli `
+              -OutputZip out/installers/sinapsi-cli-windows-x64-installer.zip
+          & source/packaging/windows/build-installer.ps1 -BinaryPath $cli -DesktopPath $desktop `
+              -NoticesDir out/notices -OutputZip out/installers/sinapsi-desktop-windows-x64-installer.zip
+          Copy-Item $cli, $desktop out/bin/
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64
+          path: out/
+          if-no-files-found: error
+
+  windows-verify:
+    name: Windows x64 — verify on ${{ matrix.family }}
+    needs: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, family: "Windows 10 family (Server 2022)" }
+          - { os: windows-2025, family: "Windows 11 family (Server 2025)" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.windows.outputs.commit }}
+          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          path: source
+          persist-credentials: false
+          sparse-checkout: |
+            packaging
+            validation
+      - uses: actions/download-artifact@v8
+        with: { name: windows-x64, path: out }
+      - name: The published zips verify their own payload
+        shell: powershell
+        run: |
+          foreach ($zip in Get-ChildItem out/installers/*.zip) {
+            $dir = Join-Path $env:RUNNER_TEMP $zip.BaseName
+            Expand-Archive $zip.FullName $dir
+            $ps1 = Get-ChildItem $dir -Recurse -Filter 'Installa Sinapsi.ps1' | Select-Object -First 1
+            & $ps1.FullName -VerifyOnly
+            if (-not $?) { throw "$($zip.Name): -VerifyOnly failed" }
+          }
+      - name: Install, upgrade, rollback, uninstall — CLI only
+        shell: powershell
+        run: .\source\validation\test_windows_installer.ps1 -BinaryPath out/bin/sinapsi.exe
+      - name: Install, upgrade, rollback, uninstall — with the desktop app
+        shell: powershell
+        run: >
+          .\source\validation\test_windows_installer.ps1 -BinaryPath out/bin/sinapsi.exe
+          -DesktopPath out/bin/sinapsi-desktop.exe -NoticesDir out/notices
+
+  macos:
+    name: macOS — build and verify
+    runs-on: macos-15
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: releases }
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SINAPSI_SOURCE_TOKEN }}
+          path: source
+          persist-credentials: false
+      - id: source
+        run: |
+          test -d source/desktop || { echo "::error::${{ inputs.ref }} has no desktop/: pick a ref that ships the desktop app"; exit 1; }
+          echo "commit=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-about@0.9.3,cargo-deny@0.20.2" }
+
+      - name: Build the CLI (Apple Silicon and Intel)
+        working-directory: source
+        run: |
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            bash ../releases/ci/quiet.sh cargo build --release --locked --message-format=short -p sinapsi-cli --target "$triple"
+          done
+      - name: Install, upgrade, rollback, uninstall — CLI
+        working-directory: source
+        run: |
+          SINAPSI_TEST_TARGET=macos-aarch64 bash validation/test_unix_installer.sh target/aarch64-apple-darwin/release/sinapsi
+          SINAPSI_TEST_TARGET=macos-x86_64 bash validation/test_unix_installer.sh target/x86_64-apple-darwin/release/sinapsi
+      - name: Build the CLI installers
+        run: |
+          for arch in aarch64 x86_64; do
+            bash source/packaging/unix/build-installer.sh \
+              --binary "source/target/$arch-apple-darwin/release/sinapsi" \
+              --target "macos-$arch" \
+              --out "out/installers/sinapsi-cli-macos-$arch-installer.sh"
+          done
+
+      - name: Third-party notices
+        run: bash releases/ci/notices.sh source aarch64-apple-darwin out/notices
+      - name: Build the desktop frontend
+        working-directory: source/desktop
+        run: |
+          bash ../../releases/ci/quiet.sh npm ci
+          bash ../../releases/ci/quiet.sh npm run build
+      - name: Bundle the desktop app (universal .dmg)
+        run: bash releases/ci/macos-desktop.sh source "${{ inputs.version }}" out/installers
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos
+          path: out/
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: inputs.version != ''
+    needs: [windows, windows-verify, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Both platforms were built from the same commit
+        run: |
+          [ "${{ needs.windows.outputs.commit }}" = "${{ needs.macos.outputs.commit }}" ] || {
+            echo "::error::${{ inputs.ref }} moved during the run: windows ${{ needs.windows.outputs.commit }}, macos ${{ needs.macos.outputs.commit }}"; exit 1; }
+      - uses: actions/download-artifact@v8
+        with: { path: artifacts }
+      - name: Collect the installers
+        run: |
+          mkdir dist
+          cp artifacts/*/installers/* dist/
+          cd dist && sha256sum * | tee SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ needs.windows.outputs.commit }}
+        run: |
+          cat > notes.md <<EOF
+          Sinapsi $VERSION — built from source commit \`$COMMIT\`.
+
+          | File | Per |
+          |---|---|
+          | \`sinapsi-cli-windows-x64-installer.zip\` | CLI globale, Windows 10 e 11 (x64) |
+          | \`sinapsi-desktop-windows-x64-installer.zip\` | App desktop + CLI, Windows 10 e 11 (x64) |
+          | \`sinapsi-cli-macos-aarch64-installer.sh\` | CLI globale, Mac Apple Silicon |
+          | \`sinapsi-cli-macos-x86_64-installer.sh\` | CLI globale, Mac Intel |
+          | \`sinapsi-desktop-macos-universal.dmg\` | App desktop, Mac Apple Silicon e Intel |
+
+          Non firmati (né Authenticode né Developer ID): verificare con \`SHA256SUMS.txt\` e vedere il README.
+          EOF
+          gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --title "Sinapsi $VERSION" --notes-file notes.md
